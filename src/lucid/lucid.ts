@@ -4,9 +4,9 @@ import {
   costModel,
   utxoToCore,
   coreToUtxo,
-  getAddressDetails,
   fromHex,
   toHex,
+  Utils,
 } from '../utils';
 import {
   Address,
@@ -16,75 +16,91 @@ import {
   PrivateKey,
   Provider,
   Slot,
+  Transaction,
   TxHash,
   Unit,
   UTxO,
   Wallet,
-  WalletProvider,
 } from '../types';
+import { Tx } from './tx';
+import { TxComplete } from './txComplete';
 
 export class Lucid {
-  static txBuilderConfig: Core.TransactionBuilderConfig;
-  static wallet: Wallet;
-  static provider: Provider;
-  static network: Network = 'Mainnet';
+  txBuilderConfig!: Core.TransactionBuilderConfig;
+  wallet!: Wallet;
+  provider!: Provider;
+  network: Network = 'Mainnet';
+  utils!: Utils;
 
-  static async initialize(provider: Provider, network?: Network) {
-    if (this.txBuilderConfig && this.network === network) return;
-
-    this.provider = provider;
-    if (network) this.network = network;
-    const protocolParameters = await provider.getProtocolParameters();
-    this.txBuilderConfig = C.TransactionBuilderConfigBuilder.new()
-      .coins_per_utxo_word(
-        C.BigNum.from_str(protocolParameters.coinsPerUtxoWord.toString())
-      )
-      .fee_algo(
-        C.LinearFee.new(
-          C.BigNum.from_str(protocolParameters.minFeeA.toString()),
-          C.BigNum.from_str(protocolParameters.minFeeB.toString())
+  static async new(provider?: Provider, network?: Network) {
+    const lucid = new this();
+    if (network) lucid.network = network;
+    if (provider) {
+      lucid.provider = provider;
+      const protocolParameters = await provider.getProtocolParameters();
+      lucid.txBuilderConfig = C.TransactionBuilderConfigBuilder.new()
+        .coins_per_utxo_word(
+          C.BigNum.from_str(protocolParameters.coinsPerUtxoWord.toString())
         )
-      )
-      .key_deposit(C.BigNum.from_str(protocolParameters.keyDeposit.toString()))
-      .pool_deposit(
-        C.BigNum.from_str(protocolParameters.poolDeposit.toString())
-      )
-      .max_tx_size(protocolParameters.maxTxSize)
-      .max_value_size(protocolParameters.maxValSize)
-      .ex_unit_prices(
-        C.ExUnitPrices.from_float(
-          protocolParameters.priceMem,
-          protocolParameters.priceStep
+        .fee_algo(
+          C.LinearFee.new(
+            C.BigNum.from_str(protocolParameters.minFeeA.toString()),
+            C.BigNum.from_str(protocolParameters.minFeeB.toString())
+          )
         )
-      )
-      .blockfrost(
-        C.Blockfrost.new(
-          provider.url + '/utils/txs/evaluate',
-          provider.projectId
+        .key_deposit(
+          C.BigNum.from_str(protocolParameters.keyDeposit.toString())
         )
-      )
-      .costmdls(costModel.plutusV1())
-      .prefer_pure_change(true)
-      .build();
+        .pool_deposit(
+          C.BigNum.from_str(protocolParameters.poolDeposit.toString())
+        )
+        .max_tx_size(protocolParameters.maxTxSize)
+        .max_value_size(protocolParameters.maxValSize)
+        .ex_unit_prices(
+          C.ExUnitPrices.from_float(
+            protocolParameters.priceMem,
+            protocolParameters.priceStep
+          )
+        )
+        .blockfrost(
+          C.Blockfrost.new(
+            provider.url + '/utils/txs/evaluate',
+            provider.projectId
+          )
+        )
+        .costmdls(costModel.plutusV1())
+        .prefer_pure_change(true)
+        .build();
+    }
+    lucid.utils = new Utils(lucid);
+    return lucid;
   }
 
-  static async currentSlot(): Promise<Slot> {
+  newTx(): Tx {
+    return new Tx(this);
+  }
+
+  fromTx(tx: Transaction) {
+    return new TxComplete(this, C.Transaction.from_bytes(fromHex(tx)));
+  }
+
+  async currentSlot(): Promise<Slot> {
     return this.provider.getCurrentSlot();
   }
 
-  static async utxosAt(address: Address): Promise<UTxO[]> {
+  async utxosAt(address: Address): Promise<UTxO[]> {
     return this.provider.getUtxos(address);
   }
 
-  static async utxosAtWithUnit(address: Address, unit: Unit): Promise<UTxO[]> {
+  async utxosAtWithUnit(address: Address, unit: Unit): Promise<UTxO[]> {
     return this.provider.getUtxosWithUnit(address, unit);
   }
 
-  static async awaitTx(txHash: TxHash): Promise<boolean> {
+  async awaitTx(txHash: TxHash): Promise<boolean> {
     return this.provider.awaitTx(txHash);
   }
 
-  static async datumOf(utxo: UTxO): Promise<Datum> {
+  async datumOf(utxo: UTxO): Promise<Datum> {
     if (!utxo.datumHash)
       throw new Error('This UTxO does not have a datum hash.');
     if (utxo.datum) return utxo.datum;
@@ -95,7 +111,7 @@ export class Lucid {
   /**
    * Cardano Private key in bech32; not the BIP32 private key or any key that is not fully derived
    */
-  static async selectWalletFromPrivateKey(privateKey: PrivateKey) {
+  selectWalletFromPrivateKey(privateKey: PrivateKey) {
     const priv = C.PrivateKey.from_bech32(privateKey);
     const pubKeyHash = priv.to_public().hash();
 
@@ -109,7 +125,7 @@ export class Lucid {
           .to_bech32(),
       rewardAddress: async () => undefined,
       getCollateral: async () => {
-        const utxos = await Lucid.utxosAt(await this.wallet.address());
+        const utxos = await this.utxosAt(await this.wallet.address());
         return utxos.filter(
           utxo =>
             Object.keys(utxo.assets).length === 1 &&
@@ -117,7 +133,7 @@ export class Lucid {
         );
       },
       getCollateralCore: async () => {
-        const utxos = await Lucid.utxosAt(await this.wallet.address());
+        const utxos = await this.utxosAt(await this.wallet.address());
         return utxos
           .filter(
             utxo =>
@@ -127,10 +143,10 @@ export class Lucid {
           .map(utxo => utxoToCore(utxo));
       },
       getUtxos: async () => {
-        return await Lucid.utxosAt(await this.wallet.address());
+        return await this.utxosAt(await this.wallet.address());
       },
       getUtxosCore: async () => {
-        const utxos = await Lucid.utxosAt(await this.wallet.address());
+        const utxos = await this.utxosAt(await this.wallet.address());
         const coreUtxos = C.TransactionUnspentOutputs.new();
         utxos.forEach(utxo => {
           coreUtxos.add(utxoToCore(utxo));
@@ -147,17 +163,13 @@ export class Lucid {
         return txWitnessSetBuilder.build();
       },
       submitTx: async (tx: Core.Transaction) => {
-        return await Lucid.provider.submitTx(tx);
+        return await this.provider.submitTx(tx);
       },
     };
+    return this;
   }
 
-  static async selectWallet(walletProvider: WalletProvider) {
-    if (!window?.cardano?.[walletProvider]) {
-      throw new Error('Wallet not installed or not in a browser environment');
-    }
-    const api = await window.cardano[walletProvider].enable();
-
+  selectWallet(api: WalletApi) {
     this.wallet = {
       address: async () =>
         C.Address.from_bytes(
@@ -214,6 +226,7 @@ export class Lucid {
         return txHash;
       },
     };
+    return this;
   }
 
   /**
@@ -222,13 +235,13 @@ export class Lucid {
    *
    * If utxos are not set, utxos are fetched from the provided address
    */
-  static async selectWalletFromUtxos({
+  selectWalletFrom({
     address,
     utxos,
     collateral,
     rewardAddress,
   }: ExternalWallet) {
-    const addressDetails = getAddressDetails(address);
+    const addressDetails = this.utils.getAddressDetails(address);
     this.wallet = {
       address: async () => address,
       rewardAddress: async () => {
@@ -237,7 +250,7 @@ export class Lucid {
             ? (() => {
                 if (addressDetails.stakeCredential.type === 'Key') {
                   return C.RewardAddress.new(
-                    Lucid.network === 'Mainnet' ? 1 : 0,
+                    this.network === 'Mainnet' ? 1 : 0,
                     C.StakeCredential.from_keyhash(
                       C.Ed25519KeyHash.from_hex(
                         addressDetails.stakeCredential.hash
@@ -248,7 +261,7 @@ export class Lucid {
                     .to_bech32();
                 }
                 return C.RewardAddress.new(
-                  Lucid.network === 'Mainnet' ? 1 : 0,
+                  this.network === 'Mainnet' ? 1 : 0,
                   C.StakeCredential.from_scripthash(
                     C.ScriptHash.from_hex(addressDetails.stakeCredential.hash)
                   )
@@ -279,11 +292,11 @@ export class Lucid {
       signTx: async (_: Core.Transaction) => {
         throw new Error('Not implemented');
       },
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      submitTx: async (_: Core.Transaction) => {
-        throw new Error('Not implemented');
+      submitTx: async (tx: Core.Transaction) => {
+        return await this.provider.submitTx(tx);
       },
     };
+    return this;
   }
 }
 

@@ -8,19 +8,18 @@ import { fromHex, toHex } from '../utils';
 export class TxComplete {
   txComplete: Core.Transaction;
   witnessSetBuilder: Core.TransactionWitnessSetBuilder;
-  /**
-   * @private
-   */
-  tasks: Function[];
+  private tasks: Function[];
+  private lucid: Lucid;
 
-  constructor(tx: Core.Transaction) {
+  constructor(lucid: Lucid, tx: Core.Transaction) {
+    this.lucid = lucid;
     this.txComplete = tx;
     this.witnessSetBuilder = C.TransactionWitnessSetBuilder.new();
     this.tasks = [];
   }
   sign() {
     this.tasks.push(async () => {
-      const witnesses = await Lucid.wallet.signTx(this.txComplete);
+      const witnesses = await this.lucid.wallet.signTx(this.txComplete);
       this.witnessSetBuilder.add_existing(witnesses);
     });
     return this;
@@ -41,7 +40,7 @@ export class TxComplete {
    * Signs the transaction and returns the witnesses that were just made
    */
   async partialSign(): Promise<TransactionWitnesses> {
-    const witnesses = await Lucid.wallet.signTx(this.txComplete);
+    const witnesses = await this.lucid.wallet.signTx(this.txComplete);
     this.witnessSetBuilder.add_existing(witnesses);
     return toHex(witnesses.to_bytes());
   }
@@ -86,6 +85,6 @@ export class TxComplete {
       this.witnessSetBuilder.build(),
       this.txComplete.auxiliary_data()
     );
-    return new TxSigned(signedTx);
+    return new TxSigned(this.lucid, signedTx);
   }
 }

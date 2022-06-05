@@ -9,6 +9,7 @@ import {
   Label,
   Lovelace,
   MintingPolicy,
+  NFTMetadata,
   PoolId,
   Redeemer,
   RewardAddress,
@@ -17,29 +18,22 @@ import {
   UTxO,
   WithdrawalValidator,
 } from '../types';
-import {
-  utxoToCore,
-  assetsToValue,
-  getAddressDetails,
-  unixTimeToSlot,
-  unixTimeToSlotTestnet,
-  fromHex,
-} from '../utils';
+import { utxoToCore, assetsToValue, fromHex } from '../utils';
 import { Lucid } from './lucid';
 import { TxComplete } from './txComplete';
 
 export class Tx {
-  txBuilder!: Core.TransactionBuilder;
-  /**
-   * @private
-   */
-  tasks!: Function[];
+  txBuilder: Core.TransactionBuilder;
+  private tasks: Function[];
+  private nftMetadata: NFTMetadata = {};
+  private lucid: Lucid;
 
-  static new() {
-    const t = new this();
-    t.tasks = [];
-    t.txBuilder = C.TransactionBuilder.new(Lucid.txBuilderConfig);
-    return t;
+  constructor(lucid: Lucid) {
+    this.lucid = lucid;
+    this.txBuilder = C.TransactionBuilder.new(this.lucid.txBuilderConfig);
+    this.tasks = [];
+    this.nftMetadata = {};
+    this.nftMetadata.version = 2;
   }
 
   /**
@@ -51,7 +45,7 @@ export class Tx {
     this.tasks.push(async () => {
       for (const utxo of utxos) {
         if (utxo.datumHash && !utxo.datum) {
-          utxo.datum = await Lucid.datumOf(utxo);
+          utxo.datum = await this.lucid.datumOf(utxo);
         }
         const coreUtxo = utxoToCore(utxo);
         this.txBuilder.add_input(
@@ -154,7 +148,7 @@ export class Tx {
     poolId: PoolId,
     redeemer?: Redeemer
   ) {
-    const addressDetails = getAddressDetails(rewardAddress);
+    const addressDetails = this.lucid.utils.getAddressDetails(rewardAddress);
     if (
       addressDetails.address.type !== 'Reward' ||
       !addressDetails.stakeCredential
@@ -186,7 +180,7 @@ export class Tx {
   }
 
   registerStake(rewardAddress: RewardAddress) {
-    const addressDetails = getAddressDetails(rewardAddress);
+    const addressDetails = this.lucid.utils.getAddressDetails(rewardAddress);
     if (
       addressDetails.address.type !== 'Reward' ||
       !addressDetails.stakeCredential
@@ -212,7 +206,7 @@ export class Tx {
   }
 
   deregisterStake(rewardAddress: RewardAddress, redeemer?: Redeemer) {
-    const addressDetails = getAddressDetails(rewardAddress);
+    const addressDetails = this.lucid.utils.getAddressDetails(rewardAddress);
     if (
       addressDetails.address.type !== 'Reward' ||
       !addressDetails.stakeCredential
@@ -267,7 +261,7 @@ export class Tx {
    * The StakeKeyHash is taken when providing a Reward address
    */
   addSigner(address: Address | RewardAddress) {
-    const addressDetails = getAddressDetails(address);
+    const addressDetails = this.lucid.utils.getAddressDetails(address);
 
     if (!addressDetails.paymentCredential && !addressDetails.stakeCredential)
       throw new Error('Not a valid address.');
@@ -287,10 +281,7 @@ export class Tx {
   }
 
   validFrom(unixTime: UnixTime) {
-    const slot =
-      Lucid.network === 'Mainnet'
-        ? unixTimeToSlot(unixTime)
-        : unixTimeToSlotTestnet(unixTime);
+    const slot = this.lucid.utils.unixTimeToSlot(unixTime);
     this.txBuilder.set_validity_start_interval(
       C.BigNum.from_str(slot.toString())
     );
@@ -298,10 +289,7 @@ export class Tx {
   }
 
   validTo(unixTime: UnixTime) {
-    const slot =
-      Lucid.network === 'Mainnet'
-        ? unixTimeToSlot(unixTime)
-        : unixTimeToSlotTestnet(unixTime);
+    const slot = this.lucid.utils.unixTimeToSlot(unixTime);
     this.txBuilder.set_ttl(C.BigNum.from_str(slot.toString()));
     return this;
   }
@@ -316,7 +304,6 @@ export class Tx {
 
   /**
    * Converts strings to bytes if prefixed with **'0x'**
-   *
    */
   attachMetadataWithConversion(label: Label, metadata: Json) {
     this.txBuilder.add_json_metadatum_with_schema(
@@ -326,6 +313,22 @@ export class Tx {
     );
     return this;
   }
+
+  // /**
+  //  * Converts strings to bytes if prefixed with **'0x'**
+  //  *
+  //  * Policy id and asset name are converted to bytes
+  //  */
+  // attachNFTMetadata(unit: Unit, metadata: NFTMetadataDetails) {
+  //   const policyId = unit.slice(0, 56);
+  //   const assetName = unit.slice(56);
+  //   this.nftMetadata['0x' + policyId] = {
+  //     ...(this.nftMetadata['0x' + policyId] || {}),
+  //     ['0x' + assetName]: metadata,
+  //   };
+
+  //   return this;
+  // }
 
   attachSpendingValidator(spendingValidator: SpendingValidator) {
     attachScript(this, spendingValidator);
@@ -356,14 +359,22 @@ export class Tx {
     return this;
   }
 
-  async complete() {
+  async complete(option?: { changeAddress?: Address; datum?: Datum }) {
     for (const task of this.tasks) {
       await task();
     }
+    // Add NFT metadata
+    if (Object.keys(this.nftMetadata).length > 1) {
+      this.txBuilder.add_json_metadatum_with_schema(
+        C.BigNum.from_str('721'),
+        JSON.stringify(this.nftMetadata),
+        C.MetadataJsonSchema.BasicConversions
+      );
+    }
 
-    const utxos = await Lucid.wallet.getUtxosCore();
+    const utxos = await this.lucid.wallet.getUtxosCore();
     if (this.txBuilder.redeemers()!?.len() > 0) {
-      const collateral = await Lucid.wallet.getCollateralCore();
+      const collateral = await this.lucid.wallet.getCollateralCore();
       if (collateral.length <= 0) throw new Error('No collateral UTxO found.');
       // 2 collateral utxos should be more than sufficient
       collateral.slice(0, 2).forEach(utxo => {
@@ -372,10 +383,23 @@ export class Tx {
     }
 
     this.txBuilder.add_inputs_from(utxos);
-    // TODO: allow change outputs to include a datum (in case address is a plutus script)
-    this.txBuilder.balance(C.Address.from_bech32(await Lucid.wallet.address()));
+    this.txBuilder.balance(
+      C.Address.from_bech32(
+        option?.changeAddress || (await this.lucid.wallet.address())
+      ),
+      option?.datum
+        ? C.Datum.new_data_hash(
+            C.hash_plutus_data(C.PlutusData.from_bytes(fromHex(option.datum)))
+          )
+        : undefined
+    );
+    if (option?.datum) {
+      this.txBuilder.add_plutus_data(
+        C.PlutusData.from_bytes(fromHex(option.datum))
+      );
+    }
 
-    return new TxComplete(await this.txBuilder.construct());
+    return new TxComplete(this.lucid, await this.txBuilder.construct());
   }
 }
 
